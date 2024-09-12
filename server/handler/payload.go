@@ -1,11 +1,8 @@
 package handler
 
 import (
-	"encoding/binary"
-
 	"github.com/bjdgyc/anylink/base"
 	"github.com/bjdgyc/anylink/dbdata"
-	"github.com/bjdgyc/anylink/pkg/utils"
 	"github.com/bjdgyc/anylink/sessdata"
 	"github.com/songgao/water/waterutil"
 )
@@ -18,8 +15,6 @@ func payloadIn(cSess *sessdata.ConnSession, pl *sessdata.Payload) bool {
 			// 校验不通过直接丢弃
 			return false
 		}
-
-		logAudit(cSess, pl)
 	}
 
 	closed := false
@@ -30,6 +25,15 @@ func payloadIn(cSess *sessdata.ConnSession, pl *sessdata.Payload) bool {
 	}
 
 	return closed
+}
+
+func putPayloadInBefore(cSess *sessdata.ConnSession, pl *sessdata.Payload) {
+	// 异步审计日志
+	if base.Cfg.AuditInterval >= 0 {
+		auditPayload.Add(cSess.Username, pl)
+		return
+	}
+	putPayload(pl)
 }
 
 func payloadOut(cSess *sessdata.ConnSession, pl *sessdata.Payload) bool {
@@ -82,68 +86,45 @@ func checkLinkAcl(group *dbdata.Group, pl *sessdata.Payload) bool {
 	}
 
 	for _, v := range group.LinkAcl {
-		// 循环判断ip和端口
-		if v.IpNet.Contains(ipDst) {
-			// 放行允许ip的ping
-			if v.Port == ipPort || v.Port == 0 || ipProto == waterutil.ICMP {
-				if v.Action == dbdata.Allow {
-					return true
-				} else {
-					return false
+		// 放行允许ip的ping
+		// if v.Ports == nil || len(v.Ports) == 0 {
+		// 	//单端口历史数据兼容
+		// 	port := uint16(v.Port.(float64))
+		// 	if port == ipPort || port == 0 || ipProto == waterutil.ICMP {
+		// 		if v.Action == dbdata.Allow {
+		// 			return true
+		// 		} else {
+		// 			return false
+		// 		}
+		// 	}
+		// } else {
+
+		// 先判断协议
+		// 兼容旧数据 v.Protocol == ""
+		if v.Protocol == "" || v.Protocol == dbdata.ALL || v.IpProto == ipProto {
+			// 循环判断ip和端口
+			if v.IpNet.Contains(ipDst) {
+				// icmp 不判断端口
+				if ipProto == waterutil.ICMP {
+					if v.Action == dbdata.Allow {
+						return true
+					} else {
+						return false
+					}
+				}
+
+				if dbdata.ContainsInPorts(v.Ports, ipPort) || dbdata.ContainsInPorts(v.Ports, 0) {
+					if v.Action == dbdata.Allow {
+						// log.Println(dbdata.Allow, v.Ports)
+						return true
+					} else {
+						// log.Println(dbdata.Deny, v.Ports)
+						return false
+					}
 				}
 			}
 		}
 	}
 
 	return false
-}
-
-// 访问日志审计
-func logAudit(cSess *sessdata.ConnSession, pl *sessdata.Payload) {
-	if base.Cfg.AuditInterval < 0 {
-		return
-	}
-
-	ipProto := waterutil.IPv4Protocol(pl.Data)
-	// 只统计 tcp和udp 的访问
-	switch ipProto {
-	case waterutil.TCP:
-	case waterutil.UDP:
-	default:
-		return
-	}
-
-	ipSrc := waterutil.IPv4Source(pl.Data)
-	ipDst := waterutil.IPv4Destination(pl.Data)
-	ipPort := waterutil.IPv4DestinationPort(pl.Data)
-
-	b := getByte34()
-	key := *b
-	copy(key[:16], ipSrc)
-	copy(key[16:32], ipDst)
-	binary.BigEndian.PutUint16(key[32:34], ipPort)
-
-	s := utils.BytesToString(key)
-	nu := utils.NowSec().Unix()
-
-	// 判断已经存在，并且没有过期
-	v, ok := cSess.IpAuditMap[s]
-	if ok && nu-v < int64(base.Cfg.AuditInterval) {
-		// 回收byte对象
-		putByte34(b)
-		return
-	}
-
-	cSess.IpAuditMap[s] = nu
-
-	audit := dbdata.AccessAudit{
-		Username:  cSess.Sess.Username,
-		Protocol:  uint8(ipProto),
-		Src:       ipSrc.String(),
-		Dst:       ipDst.String(),
-		DstPort:   ipPort,
-		CreatedAt: utils.NowSec(),
-	}
-
-	_ = dbdata.Add(audit)
 }

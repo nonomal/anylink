@@ -33,6 +33,7 @@ type ServerConfig struct {
 	// LinkAddr      string `json:"link_addr"`
 	Conf           string `json:"conf"`
 	Profile        string `json:"profile"`
+	ProfileName    string `json:"profile_name"`
 	ServerAddr     string `json:"server_addr"`
 	ServerDTLSAddr string `json:"server_dtls_addr"`
 	ServerDTLS     bool   `json:"server_dtls"`
@@ -45,10 +46,12 @@ type ServerConfig struct {
 	FilesPath      string `json:"files_path"`
 	LogPath        string `json:"log_path"`
 	LogLevel       string `json:"log_level"`
+	HttpServerLog  bool   `json:"http_server_log"`
 	Pprof          bool   `json:"pprof"`
 	Issuer         string `json:"issuer"`
 	AdminUser      string `json:"admin_user"`
 	AdminPass      string `json:"admin_pass"`
+	AdminOtp       string `json:"admin_otp"`
 	JwtSecret      string `json:"jwt_secret"`
 
 	LinkMode    string `json:"link_mode"`    // tun tap macvtap ipvtap
@@ -67,10 +70,20 @@ type ServerConfig struct {
 	MobileKeepalive int    `json:"mobile_keepalive"`
 	MobileDpd       int    `json:"mobile_dpd"`
 	Mtu             int    `json:"mtu"`
+	DefaultDomain   string `json:"default_domain"`
 
+	IdleTimeout    int `json:"idle_timeout"`    // in seconds
 	SessionTimeout int `json:"session_timeout"` // in seconds
 	// AuthTimeout    int `json:"auth_timeout"`    // in seconds
 	AuditInterval int `json:"audit_interval"` // in seconds
+
+	ShowSQL         bool `json:"show_sql"` // bool
+	IptablesNat     bool `json:"iptables_nat"`
+	Compression     bool `json:"compression"`       // bool
+	NoCompressLimit int  `json:"no_compress_limit"` // int
+
+	DisplayError    bool `json:"display_error"`
+	ExcludeExportIp bool `json:"exclude_export_ip"`
 }
 
 func initServerCfg() {
@@ -144,6 +157,7 @@ type SCfg struct {
 	Env  string      `json:"env"`
 	Info string      `json:"info"`
 	Data interface{} `json:"data"`
+	Val  interface{} `json:"default"`
 }
 
 func ServerCfg2Slice() []SCfg {
@@ -158,18 +172,27 @@ func ServerCfg2Slice() []SCfg {
 		field := typ.Field(i)
 		value := s.Field(i)
 		tag := field.Tag.Get("json")
-		usage, env := getUsageEnv(tag)
+		usage, env, val := getUsageEnv(tag)
 
-		datas = append(datas, SCfg{Name: tag, Env: env, Info: usage, Data: value.Interface()})
+		datas = append(datas, SCfg{Name: tag, Env: env, Info: usage, Data: value.Interface(), Val: val})
 	}
 
 	return datas
 }
 
-func getUsageEnv(name string) (usage, env string) {
+func getUsageEnv(name string) (usage, env string, val interface{}) {
 	for _, v := range configs {
 		if v.Name == name {
 			usage = v.Usage
+			if v.Typ == cfgStr {
+				val = v.ValStr
+			}
+			if v.Typ == cfgInt {
+				val = v.ValInt
+			}
+			if v.Typ == cfgBool {
+				val = v.ValBool
+			}
 		}
 	}
 

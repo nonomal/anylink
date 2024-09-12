@@ -4,11 +4,16 @@ import (
 	"fmt"
 
 	"github.com/bjdgyc/anylink/base"
+	"github.com/bjdgyc/anylink/pkg/utils"
 	"github.com/bjdgyc/anylink/sessdata"
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/songgao/water"
 )
 
 func checkTun() {
+	// 测试ip命令
+	base.CheckModOrLoad("tun")
+
 	// 测试tun
 	cfg := water.Config{
 		DeviceType: water.TUN,
@@ -20,11 +25,52 @@ func checkTun() {
 	}
 	defer ifce.Close()
 
-	// 测试ip命令
-	cmdstr := fmt.Sprintf("ip link set dev %s up mtu %s multicast off", ifce.Name(), "1399")
-	err = execCmd([]string{cmdstr})
+	cmdstr1 := fmt.Sprintf("ip link set dev %s up mtu %s multicast off", ifce.Name(), "1399")
+	err = execCmd([]string{cmdstr1})
 	if err != nil {
 		base.Fatal("testTun err: ", err)
+	}
+	// 开启服务器转发
+	err = execCmd([]string{"sysctl -w net.ipv4.ip_forward=1"})
+	if err != nil {
+		base.Fatal(err)
+	}
+	if base.Cfg.IptablesNat {
+		// 添加NAT转发规则
+		ipt, err := iptables.New()
+		if err != nil {
+			base.Fatal(err)
+			return
+		}
+
+		// 修复 rockyos nat 不生效
+		base.CheckModOrLoad("iptable_filter")
+		base.CheckModOrLoad("iptable_nat")
+		// base.CheckModOrLoad("xt_comment")
+
+		// 添加注释
+		natRule := []string{"-s", base.Cfg.Ipv4CIDR, "-o", base.Cfg.Ipv4Master, "-m", "comment",
+			"--comment", "AnyLink", "-j", "MASQUERADE"}
+		if base.InContainer {
+			natRule = []string{"-s", base.Cfg.Ipv4CIDR, "-o", base.Cfg.Ipv4Master, "-j", "MASQUERADE"}
+		}
+		err = ipt.InsertUnique("nat", "POSTROUTING", 1, natRule...)
+		if err != nil {
+			base.Error(err)
+		}
+
+		// 添加注释
+		forwardRule := []string{"-m", "comment", "--comment", "AnyLink", "-j", "ACCEPT"}
+		if base.InContainer {
+			forwardRule = []string{"-j", "ACCEPT"}
+		}
+		err = ipt.InsertUnique("filter", "FORWARD", 1, forwardRule...)
+		if err != nil {
+			base.Error(err)
+		}
+
+		base.Info(ipt.List("nat", "POSTROUTING"))
+		base.Info(ipt.List("filter", "FORWARD"))
 	}
 }
 
@@ -42,7 +88,9 @@ func LinkTun(cSess *sessdata.ConnSession) error {
 	// log.Printf("Interface Name: %s\n", ifce.Name())
 	cSess.SetIfName(ifce.Name())
 
-	cmdstr1 := fmt.Sprintf("ip link set dev %s up mtu %d multicast off", ifce.Name(), cSess.Mtu)
+	// 通过 ip link show  查看 alias 信息
+	alias := utils.ParseName(cSess.Group.Name + "." + cSess.Username)
+	cmdstr1 := fmt.Sprintf("ip link set dev %s up mtu %d multicast off alias %s", ifce.Name(), cSess.Mtu, alias)
 	cmdstr2 := fmt.Sprintf("ip addr add dev %s local %s peer %s/32",
 		ifce.Name(), base.Cfg.Ipv4Gateway, cSess.IpAddr)
 	err = execCmd([]string{cmdstr1, cmdstr2})
@@ -85,7 +133,7 @@ func tunWrite(ifce *water.Interface, cSess *sessdata.ConnSession) {
 			return
 		}
 
-		putPayload(pl)
+		putPayloadInBefore(cSess, pl)
 	}
 }
 

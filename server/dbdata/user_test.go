@@ -17,12 +17,12 @@ func TestCheckUser(t *testing.T) {
 
 	// 添加一个组
 	dns := []ValData{{Val: "114.114.114.114"}}
-	route := []ValData{{Val: "192.168.1.1/24"}}
+	route := []ValData{{Val: "192.168.1.0/24"}}
 	g := Group{Name: group, Status: 1, ClientDns: dns, RouteInclude: route}
 	err := SetGroup(&g)
 	ast.Nil(err)
 	// 判断 IpMask
-	ast.Equal(g.RouteInclude[0].IpMask, "192.168.1.1/255.255.255.0")
+	ast.Equal(g.RouteInclude[0].IpMask, "192.168.1.0/255.255.255.0")
 
 	// 添加一个用户
 	u := User{Username: "aaa", Groups: []string{group}, Status: 1}
@@ -59,7 +59,7 @@ func TestCheckUser(t *testing.T) {
 	}
 	// 添加用户策略
 	dns2 := []ValData{{Val: "8.8.8.8"}}
-	route2 := []ValData{{Val: "192.168.2.1/24"}}
+	route2 := []ValData{{Val: "192.168.2.0/24"}}
 	p1 := Policy{Username: "aaa", Status: 1, ClientDns: dns2, RouteInclude: route2}
 	err = SetPolicy(&p1)
 	ast.Nil(err)
@@ -70,13 +70,14 @@ func TestCheckUser(t *testing.T) {
 	authData = map[string]interface{}{
 		"type": "ldap",
 		"ldap": map[string]interface{}{
-			"addr":        "192.168.8.12:389",
-			"tls":         true,
-			"bind_name":   "userfind@abc.com",
-			"bind_pwd":    "afdbfdsafds",
-			"base_dn":     "dc=abc,dc=com",
-			"search_attr": "sAMAccountName",
-			"member_of":   "cn=vpn,cn=user,dc=abc,dc=com",
+			"addr":         "192.168.8.12:389",
+			"tls":          true,
+			"bind_name":    "userfind@abc.com",
+			"bind_pwd":     "afdbfdsafds",
+			"base_dn":      "dc=abc,dc=com",
+			"object_class": "person",
+			"search_attr":  "sAMAccountName",
+			"member_of":    "cn=vpn,cn=user,dc=abc,dc=com",
 		},
 	}
 	g3 := Group{Name: group3, Status: 1, ClientDns: dns, RouteInclude: route, Auth: authData}
