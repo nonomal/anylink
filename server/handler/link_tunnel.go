@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strings"
 	"text/template"
@@ -34,20 +35,21 @@ func HttpAddHeader(w http.ResponseWriter, key string, value string) {
 
 func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	// TODO 调试信息输出
-	// hd, _ := httputil.DumpRequest(r, true)
-	// fmt.Println("DumpRequest: ", string(hd))
-	// fmt.Println("LinkTunnel", r.RemoteAddr)
+	if base.GetLogLevel() == base.LogLevelTrace {
+		hd, _ := httputil.DumpRequest(r, true)
+		base.Trace("LinkTunnel: ", string(hd))
+	}
 
 	// 判断session-token的值
 	cookie, err := r.Cookie("webvpn")
 	if err != nil || cookie.Value == "" {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	sess := sessdata.SToken2Sess(cookie.Value)
 	if sess == nil {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
@@ -55,7 +57,7 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	cSess := sess.NewConn()
 	if cSess == nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
@@ -64,11 +66,14 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	cstpBaseMtu := r.Header.Get("X-CSTP-Base-MTU")
 	masterSecret := r.Header.Get("X-DTLS-Master-Secret")
 	localIp := r.Header.Get("X-Cstp-Local-Address-Ip4")
+	// 出口ip
+	exportIp4 := r.Header.Get("X-Cstp-Remote-Address-Ip4")
 	mobile := r.Header.Get("X-Cstp-License")
 
 	cSess.SetMtu(cstpMtu)
 	cSess.MasterSecret = masterSecret
 	cSess.RemoteAddr = r.RemoteAddr
+	cSess.UserAgent = strings.ToLower(r.UserAgent())
 	cSess.LocalIp = net.ParseIP(localIp)
 	cstpKeepalive := base.Cfg.CstpKeepalive
 	cstpDpd := base.Cfg.CstpDpd
@@ -81,13 +86,17 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	cSess.CstpDpd = cstpDpd
 
-	dtlsPort := "4433"
-	if strings.Contains(base.Cfg.ServerDTLSAddr, ":") {
-		ss := strings.Split(base.Cfg.ServerDTLSAddr, ":")
+	dtlsPort := "443"
+	if strings.Contains(base.Cfg.AdvertiseDTLSAddr, ":") {
+		ss := strings.Split(base.Cfg.AdvertiseDTLSAddr, ":")
 		dtlsPort = ss[1]
 	}
 
-	base.Debug(cSess.IpAddr, cSess.MacHw, sess.Username, mobile)
+	base.Info(sess.Username, cSess.IpAddr, cSess.MacHw, cSess.Client, mobile)
+
+	// 检测密码套件
+	dtlsCiphersuite := checkDtls12Ciphersuite(r.Header.Get("X-Dtls12-Ciphersuite"))
+	base.Trace("dtlsCiphersuite", dtlsCiphersuite)
 
 	// 返回客户端数据
 	HttpSetHeader(w, "Server", fmt.Sprintf("%s %s", base.APP_NAME, base.APP_VER))
@@ -97,11 +106,22 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	HttpSetHeader(w, "X-CSTP-Address", cSess.IpAddr.String())             // 分配的ip地址
 	HttpSetHeader(w, "X-CSTP-Netmask", sessdata.IpPool.Ipv4Mask.String()) // 子网掩码
 	HttpSetHeader(w, "X-CSTP-Hostname", hn)                               // 机器名称
-	//HttpSetHeader(w, "X-CSTP-Default-Domain", cSess.LocalIp)
 	HttpSetHeader(w, "X-CSTP-Base-MTU", cstpBaseMtu)
+	// 客户端dns的默认搜索域
+	if base.Cfg.DefaultDomain != "" {
+		HttpSetHeader(w, "X-CSTP-Default-Domain", base.Cfg.DefaultDomain)
+	}
+
+	// 压缩
+	if cmpName, ok := cSess.SetPickCmp("cstp", r.Header.Get("X-Cstp-Accept-Encoding")); ok {
+		HttpSetHeader(w, "X-CSTP-Content-Encoding", cmpName)
+	}
+	if cmpName, ok := cSess.SetPickCmp("dtls", r.Header.Get("X-Dtls-Accept-Encoding")); ok {
+		HttpSetHeader(w, "X-DTLS-Content-Encoding", cmpName)
+	}
 
 	// 设置用户策略
-	SetUserPolicy(sess.Username, cSess.Group)
+	SetUserPolicy(cSess.Username, cSess.Group)
 
 	// 允许本地LAN访问vpn网络，必须放在路由的第一个
 	if cSess.Group.AllowLan {
@@ -111,9 +131,14 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	for _, v := range cSess.Group.ClientDns {
 		HttpAddHeader(w, "X-CSTP-DNS", v.Val)
 	}
+	// 分割dns
+	for _, v := range cSess.Group.SplitDns {
+		HttpAddHeader(w, "X-CSTP-Split-DNS", v.Val)
+	}
+
 	// 允许的路由
 	for _, v := range cSess.Group.RouteInclude {
-		if v.Val == dbdata.All {
+		if strings.ToLower(v.Val) == dbdata.ALL {
 			continue
 		}
 		HttpAddHeader(w, "X-CSTP-Split-Include", v.IpMask)
@@ -122,7 +147,12 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	for _, v := range cSess.Group.RouteExclude {
 		HttpAddHeader(w, "X-CSTP-Split-Exclude", v.IpMask)
 	}
-	HttpSetHeader(w, "X-CSTP-Lease-Duration", fmt.Sprintf("%d", base.Cfg.IpLease)) // ip地址租期
+	// 排除出口ip路由(出口ip不加密传输)
+	if base.Cfg.ExcludeExportIp && exportIp4 != "" {
+		HttpAddHeader(w, "X-CSTP-Split-Exclude", exportIp4+"/255.255.255.255")
+	}
+
+	HttpSetHeader(w, "X-CSTP-Lease-Duration", "1209600") // ip地址租期
 	HttpSetHeader(w, "X-CSTP-Session-Timeout", "none")
 	HttpSetHeader(w, "X-CSTP-Session-Timeout-Alert-Interval", "60")
 	HttpSetHeader(w, "X-CSTP-Session-Timeout-Remaining", "none")
@@ -131,8 +161,10 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	HttpSetHeader(w, "X-CSTP-Keep", "true")
 	HttpSetHeader(w, "X-CSTP-Tunnel-All-DNS", "false")
 
-	HttpSetHeader(w, "X-CSTP-Rekey-Time", "172800")
+	HttpSetHeader(w, "X-CSTP-Rekey-Time", "86400") // 172800
 	HttpSetHeader(w, "X-CSTP-Rekey-Method", "new-tunnel")
+	HttpSetHeader(w, "X-DTLS-Rekey-Time", "86400")
+	HttpSetHeader(w, "X-DTLS-Rekey-Method", "new-tunnel")
 
 	HttpSetHeader(w, "X-CSTP-DPD", fmt.Sprintf("%d", cstpDpd))
 	HttpSetHeader(w, "X-CSTP-Keepalive", fmt.Sprintf("%d", cstpKeepalive))
@@ -147,14 +179,13 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	HttpSetHeader(w, "X-DTLS-Port", dtlsPort)
 	HttpSetHeader(w, "X-DTLS-DPD", fmt.Sprintf("%d", cstpDpd))
 	HttpSetHeader(w, "X-DTLS-Keepalive", fmt.Sprintf("%d", cstpKeepalive))
-	HttpSetHeader(w, "X-DTLS-Rekey-Time", "5400")
-	HttpSetHeader(w, "X-DTLS12-CipherSuite", "ECDHE-ECDSA-AES128-GCM-SHA256")
+	HttpSetHeader(w, "X-DTLS12-CipherSuite", dtlsCiphersuite)
 
 	HttpSetHeader(w, "X-CSTP-License", "accept")
 	HttpSetHeader(w, "X-CSTP-Routing-Filtering-Ignore", "false")
 	HttpSetHeader(w, "X-CSTP-Quarantine", "false")
 	HttpSetHeader(w, "X-CSTP-Disable-Always-On-VPN", "false")
-	HttpSetHeader(w, "X-CSTP-Client-Bypass-Protocol", "false")
+	HttpSetHeader(w, "X-CSTP-Client-Bypass-Protocol", "true")
 	HttpSetHeader(w, "X-CSTP-TCP-Keepalive", "false")
 	// 设置域名拆分隧道（移动端不支持）
 	if mobile != "mobile" {
@@ -164,10 +195,9 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	hClone := w.Header().Clone()
-	headers := make([]byte, 0)
-	buf := bytes.NewBuffer(headers)
+	buf := &bytes.Buffer{}
 	_ = hClone.Write(buf)
-	base.Debug(buf.String())
+	base.Debug("LinkTunnel Response Header:", buf.String())
 
 	hj := w.(http.Hijacker)
 	conn, bufRW, err := hj.Hijack()
@@ -191,6 +221,15 @@ func LinkTunnel(w http.ResponseWriter, r *http.Request) {
 		base.Error(err)
 		return
 	}
+	dbdata.UserActLogIns.Add(dbdata.UserActLog{
+		Username:        sess.Username,
+		GroupName:       sess.Group,
+		IpAddr:          cSess.IpAddr.String(),
+		RemoteAddr:      cSess.RemoteAddr,
+		DeviceType:      sess.DeviceType,
+		PlatformVersion: sess.PlatformVersion,
+		Status:          dbdata.UserConnected,
+	}, cSess.UserAgent)
 
 	go LinkCstp(conn, bufRW, cSess)
 }
@@ -209,7 +248,11 @@ func SetPostAuthXml(g *dbdata.Group, w http.ResponseWriter) error {
 	if err != nil {
 		return err
 	}
-	HttpSetHeader(w, "X-CSTP-Post-Auth-XML", result.String())
+	xmlAuth := ""
+	for _, v := range strings.Split(result.String(), "\n") {
+		xmlAuth += strings.TrimSpace(v)
+	}
+	HttpSetHeader(w, "X-CSTP-Post-Auth-XML", xmlAuth)
 	return nil
 }
 

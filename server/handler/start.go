@@ -7,6 +7,7 @@ import (
 
 	"github.com/bjdgyc/anylink/admin"
 	"github.com/bjdgyc/anylink/base"
+	"github.com/bjdgyc/anylink/cron"
 	"github.com/bjdgyc/anylink/dbdata"
 	"github.com/bjdgyc/anylink/sessdata"
 )
@@ -14,6 +15,15 @@ import (
 func Start() {
 	dbdata.Start()
 	sessdata.Start()
+	cron.Start()
+
+	admin.InitLockManager() //初始化防爆破定时器和IP白名单
+
+	// 开启服务器转发
+	err := execCmd([]string{"sysctl -w net.ipv4.ip_forward=1"})
+	if err != nil {
+		base.Fatal(err)
+	}
 
 	switch base.Cfg.LinkMode {
 	case base.LinkModeTUN:
@@ -37,6 +47,8 @@ func Start() {
 	go admin.StartAdmin()
 	go startTls()
 	go startDtls()
+
+	go logAuditBatch()
 }
 
 func Stop() {

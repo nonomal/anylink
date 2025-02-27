@@ -3,6 +3,7 @@ package dbdata
 import (
 	"encoding/json"
 	"reflect"
+
 	"xorm.io/xorm"
 )
 
@@ -19,9 +20,17 @@ type SettingSmtp struct {
 	Encryption string `json:"encryption"`
 }
 
+type SettingAuditLog struct {
+	AuditInterval int    `json:"audit_interval"`
+	LifeDay       int    `json:"life_day"`
+	ClearTime     string `json:"clear_time"`
+}
+
 type SettingOther struct {
 	LinkAddr    string `json:"link_addr"`
 	Banner      string `json:"banner"`
+	Homecode    int    `json:"homecode"`
+	Homeindex   string `json:"homeindex"`
 	AccountMail string `json:"account_mail"`
 }
 
@@ -41,7 +50,6 @@ func SettingSessAdd(sess *xorm.Session, data interface{}) error {
 	v, _ := json.Marshal(data)
 	s := &Setting{Name: name, Data: v}
 	_, err := sess.InsertOne(s)
-
 	return err
 }
 
@@ -55,11 +63,38 @@ func SettingSet(data interface{}) error {
 
 func SettingGet(data interface{}) error {
 	name := StructName(data)
-	s := &Setting{Name: name}
+	s := &Setting{}
 	err := One("name", name, s)
 	if err != nil {
 		return err
 	}
 	err = json.Unmarshal(s.Data, data)
 	return err
+}
+
+func SettingGetAuditLog() (SettingAuditLog, error) {
+	data := SettingAuditLog{}
+	err := SettingGet(&data)
+	if err == nil {
+		return data, err
+	}
+	if !CheckErrNotFound(err) {
+		return data, err
+	}
+	sess := xdb.NewSession()
+	defer sess.Close()
+	auditLog := SettingGetAuditLogDefault()
+	err = SettingSessAdd(sess, auditLog)
+	if err != nil {
+		return data, err
+	}
+	return auditLog, nil
+}
+
+func SettingGetAuditLogDefault() SettingAuditLog {
+	auditLog := SettingAuditLog{
+		LifeDay:   0,
+		ClearTime: "05:00",
+	}
+	return auditLog
 }

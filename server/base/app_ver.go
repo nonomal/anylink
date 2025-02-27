@@ -2,6 +2,12 @@ package base
 
 const (
 	APP_NAME = "AnyLink"
-	// 添加radius支持
-	APP_VER = "0.8.1"
+)
+
+var (
+	// APP_VER app版本号
+	APP_VER = "0.0.1"
+	// 提交id
+	CommitId  string
+	BuildDate string
 )

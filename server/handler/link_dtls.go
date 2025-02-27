@@ -5,12 +5,13 @@ import (
 	"time"
 
 	"github.com/bjdgyc/anylink/base"
+	"github.com/bjdgyc/anylink/dbdata"
 	"github.com/bjdgyc/anylink/pkg/utils"
 	"github.com/bjdgyc/anylink/sessdata"
 )
 
 func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
-	base.Debug("LinkDtls connect ip:", cSess.IpAddr, "udp-rip:", conn.RemoteAddr())
+	base.Debug("LinkDtls connect ip:", cSess.IpAddr, "user:", cSess.Username, "udp-rip:", conn.RemoteAddr())
 	dSess := cSess.NewDtlsConn()
 	if dSess == nil {
 		// 创建失败，直接关闭链接
@@ -19,7 +20,7 @@ func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
 	}
 
 	defer func() {
-		base.Debug("LinkDtls return", cSess.IpAddr)
+		base.Debug("LinkDtls return", cSess.Username, cSess.IpAddr)
 		_ = conn.Close()
 		dSess.Close()
 	}()
@@ -35,14 +36,14 @@ func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
 	for {
 		err = conn.SetReadDeadline(utils.NowSec().Add(dead))
 		if err != nil {
-			base.Error("SetDeadline: ", err)
+			base.Error("SetDeadline: ", cSess.Username, cSess.IpAddr, err)
 			return
 		}
 
 		pl := getPayload()
 		n, err = conn.Read(pl.Data)
 		if err != nil {
-			base.Error("read hdata: ", err)
+			base.Warn("read hdata: ", cSess.Username, cSess.IpAddr, err)
 			return
 		}
 
@@ -55,18 +56,36 @@ func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
 		switch pl.Data[0] {
 		case 0x07: // KEEPALIVE
 			// do nothing
-			// base.Debug("recv keepalive", cSess.IpAddr)
+			base.Trace("recv LinkDtls Keepalive", cSess.Username, cSess.IpAddr, conn.RemoteAddr())
 		case 0x05: // DISCONNECT
-			base.Debug("DISCONNECT DTLS", cSess.IpAddr)
+			cSess.UserLogoutCode = dbdata.UserLogoutClient
+			base.Info("DISCONNECT DTLS", cSess.Username, cSess.IpAddr, conn.RemoteAddr())
 			return
 		case 0x03: // DPD-REQ
-			// base.Debug("recv DPD-REQ", cSess.IpAddr)
+			base.Trace("recv LinkDtls DPD-REQ", cSess.Username, cSess.IpAddr, conn.RemoteAddr(), n)
 			pl.PType = 0x04
+			// 从零开始 可以直接赋值
+			pl.Data = pl.Data[:n]
 			if payloadOutDtls(cSess, dSess, pl) {
 				return
 			}
 		case 0x04:
-			// base.Debug("recv DPD-RESP", cSess.IpAddr)
+			base.Trace("recv LinkDtls DPD-RESP", cSess.Username, cSess.IpAddr, conn.RemoteAddr())
+		case 0x08: // decompress
+			if cSess.DtlsPickCmp == nil {
+				continue
+			}
+			dst := getByteFull()
+			nn, err := cSess.DtlsPickCmp.Uncompress(pl.Data[1:], *dst)
+			if err != nil {
+				putByte(dst)
+				base.Error("dtls decompress error", err, n)
+				continue
+			}
+			pl.Data = append(pl.Data[:1], (*dst)[:nn]...)
+			putByte(dst)
+			n = nn + 1
+			fallthrough
 		case 0x00: // DATA
 			// 去除数据头
 			// copy(pl.Data, pl.Data[1:n])
@@ -76,6 +95,8 @@ func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
 			if payloadIn(cSess, pl) {
 				return
 			}
+			// 只记录返回正确的数据时间
+			cSess.LastDataTime.Store(utils.NowSec().Unix())
 		}
 
 	}
@@ -83,7 +104,7 @@ func LinkDtls(conn net.Conn, cSess *sessdata.ConnSession) {
 
 func dtlsWrite(conn net.Conn, dSess *sessdata.DtlsSession, cSess *sessdata.ConnSession) {
 	defer func() {
-		base.Debug("dtlsWrite return", cSess.IpAddr)
+		base.Debug("dtlsWrite return", cSess.Username, cSess.IpAddr)
 		_ = conn.Close()
 		dSess.Close()
 	}()
@@ -106,21 +127,39 @@ func dtlsWrite(conn net.Conn, dSess *sessdata.DtlsSession, cSess *sessdata.ConnS
 
 		// header = []byte{payload.PType}
 		if pl.PType == 0x00 { // data
-			// 获取数据长度
-			l := len(pl.Data)
-			// 先扩容 +1
-			pl.Data = pl.Data[:l+1]
-			// 数据后移
-			copy(pl.Data[1:], pl.Data)
-			// 添加头信息
-			pl.Data[0] = pl.PType
+			isCompress := false
+			if cSess.DtlsPickCmp != nil && len(pl.Data) > base.Cfg.NoCompressLimit {
+				dst := getByteFull()
+				size, err := cSess.DtlsPickCmp.Compress(pl.Data, (*dst)[1:])
+				if err == nil && size < len(pl.Data) {
+					(*dst)[0] = 0x08
+					pl.Data = append(pl.Data[:0], (*dst)[:size+1]...)
+					isCompress = true
+				}
+				putByte(dst)
+			}
+			// 未压缩
+			if !isCompress {
+				// 获取数据长度
+				l := len(pl.Data)
+				// 先扩容 +1
+				pl.Data = pl.Data[:l+1]
+				// 数据后移
+				copy(pl.Data[1:], pl.Data)
+				// 添加头信息
+				pl.Data[0] = pl.PType
+			}
 		} else {
 			// 设置头类型
-			pl.Data = append(pl.Data[:0], pl.PType)
+			if pl.PType == 0x04 {
+				pl.Data[0] = pl.PType
+			} else {
+				pl.Data = append(pl.Data[:0], pl.PType)
+			}
 		}
 		n, err := conn.Write(pl.Data)
 		if err != nil {
-			base.Error("write err", err)
+			base.Warn("write err", cSess.Username, cSess.IpAddr, err)
 			return
 		}
 

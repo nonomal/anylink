@@ -2,9 +2,9 @@ package handler
 
 import (
 	"encoding/xml"
-	"log"
-	"net/http"
 	"os/exec"
+
+	"github.com/bjdgyc/anylink/base"
 )
 
 const BufferSize = 2048
@@ -17,6 +17,8 @@ type ClientRequest struct {
 	Version              string         `xml:"version"`                     // 客户端版本号
 	GroupAccess          string         `xml:"group-access"`                // 请求的地址
 	GroupSelect          string         `xml:"group-select"`                // 选择的组名
+	RemoteAddr           string         `xml:"remote_addr"`
+	UserAgent            string         `xml:"user_agent"`
 	SessionId            string         `xml:"session-id"`
 	SessionToken         string         `xml:"session-token"`
 	Auth                 auth           `xml:"auth"`
@@ -25,8 +27,10 @@ type ClientRequest struct {
 }
 
 type auth struct {
-	Username string `xml:"username"`
-	Password string `xml:"password"`
+	Username          string `xml:"username"`
+	Password          string `xml:"password"`
+	OtpSecret         string `xml:"otp_secret"`
+	SecondaryPassword string `xml:"secondary_password"`
 }
 
 type deviceId struct {
@@ -41,24 +45,12 @@ type macAddressList struct {
 	MacAddress string `xml:"mac-address"`
 }
 
-func setCommonHeader(w http.ResponseWriter) {
-	// Content-Length Date 默认已经存在
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-	w.Header().Set("X-Aggregate-Auth", "1")
-	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-}
-
 func execCmd(cmdStrs []string) error {
 	for _, cmdStr := range cmdStrs {
 		cmd := exec.Command("sh", "-c", cmdStr)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
-			log.Println(string(b))
+			base.Error(cmdStr, string(b))
 			return err
 		}
 	}
